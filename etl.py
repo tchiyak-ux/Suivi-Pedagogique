@@ -291,3 +291,31 @@ def fit(df, y, xn, xc, kind):
             except Exception: pass
     if len(resid) >= 3: dg["Shapiro-Wilk p (résidus)"] = stats.shapiro(resid)[1]
     return dict(tab=tab, diag=dg, resid=np.asarray(resid), fitted=np.asarray(fitted), vif=vif(X), glm=glm)
+
+
+# ---------- Analyse multi-niveau ----------
+GEO = ["Region", "Departement", "Arrondissement", "Etablissement"]
+RATE = {"couverture": "Couverture", "assiduite": "Assiduite", "reussite": "Reussite"}
+
+
+def cells(cl):
+    """Taux par cellule (établissement × sous-système × matière), avec la géographie complète."""
+    return {k: aggregate(k, cl[k], GEO + ["Sous_systeme", "Matiere"]) for k in RATE if k in cl}
+
+
+def level_means(cells_, by):
+    """Taux par unité géographique : moyenne des taux des cellules établissement × matière.
+    Équivaut à pondérer chaque établissement par son nombre de matières."""
+    out = None
+    for k, c in cells_.items():
+        col = RATE[k]; c = c[c[col].notna()]
+        g = c.groupby(by).agg(**{col: (col, "mean"), "Cellules_" + col: (col, "size")}).reset_index()
+        out = g if out is None else out.merge(g, on=by, how="outer")
+    return out
+
+
+def below(c, seuil, by):
+    c = c.assign(sous=c.Reussite < seuil)
+    g = c.groupby(by).agg(Matieres_total=("Reussite", "size"), Matieres_sous_seuil=("sous", "sum"), Reussite_moyenne=("Reussite", "mean")).reset_index()
+    g["Part sous le seuil (%)"] = g.Matieres_sous_seuil / g.Matieres_total * 100
+    return g.sort_values("Part sous le seuil (%)", ascending=False)

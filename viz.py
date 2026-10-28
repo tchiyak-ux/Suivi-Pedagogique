@@ -96,3 +96,12 @@ def resid_plot(title, fitted, resid, key):
     o["series"] = [{"type": "scatter", "data": [[_f(a), _f(b)] for a, b in zip(fitted, resid)], "symbolSize": 8,
                     "markLine": {"data": [{"yAxis": 0}], "symbol": "none"}}]
     draw(o, key)
+
+
+def bars_multi(title, cats, series, key, ylabel="%", sub=""):
+    """Barres groupées : plusieurs indicateurs sur la même figure."""
+    o = _base(title, sub); o["legend"] = {"bottom": 0}; o["grid"]["bottom"] = 90
+    o["xAxis"] = {"type": "category", "data": [str(c) for c in cats], "axisLabel": {"interval": 0, "rotate": 30}}
+    o["yAxis"] = {"type": "value", "name": ylabel}
+    o["series"] = [{"name": n, "type": "bar", "data": [_f(v) for v in vals], "label": {"show": True, "position": "top", "fontSize": 10}} for n, vals in series.items()]
+    draw(o, key, 460)

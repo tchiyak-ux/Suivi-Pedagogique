@@ -76,8 +76,8 @@ def page_data():
     q = []
     for k, d in cl.items():
         q.append({"Fichier": LABEL[k], "Lignes": len(d), "Matières brutes": d.Matiere_brute.nunique(), "Matières harmonisées": d.Matiere.nunique(),
-                  "Anomalies": {"assiduite": " lignes ≥ seuil", "couverture": " lignes à Prévu = 0",
-                              "reussite": " ligne(s) incomplète(s)", "manque": "—"}[k]})
+                  "Anomalies": {"assiduite": f"{int(d.aberrant.sum())} lignes ≥ seuil", "couverture": f"{int((d.Prevu == 0).sum())} lignes à Prévu = 0",
+                              "reussite": f"{int(d.taux.isna().sum())} ligne(s) incomplète(s)", "manque": "—"}[k]})
     table(pd.DataFrame(q))
     st.caption("Harmonisation : sous-système (Anglophone/Francophone), type d'éducation (Général/Technique/Normal), établissements (casse et ponctuation), matières FR/EN fusionnées, classes ramenées au niveau (Form 4 All → Form 4 ; Terminale A/C/D → Terminale) et au cycle. Les taux sont recalculés à partir des effectifs et heures.")
     st.subheader("Tableau joint")
@@ -102,8 +102,7 @@ def page_data():
         table(m[m.groupby("Matiere").Matiere_brute.transform("nunique") > 1].sort_values("Matiere"))
 
 
-def page_uni():
-    st.header(":material/bar_chart: Analyse univariée")
+def uni_tab():
     c1, c2, c3 = st.columns([2, 2, 1])
     kind = c1.selectbox("Indicateur", [k for k in LABEL if k in cl], format_func=LABEL.get)
     d = cl[kind]; v = etl.valid(kind, d)
@@ -135,6 +134,83 @@ def page_uni():
         viz.bar(f"Classes sans enseignant par {dim}", gg[dim], gg.Classes_sans_enseignant, f"m_{dim}", "Classes", horizontal=True)
         st.subheader("Tableau détaillé"); table(g)
         st.caption("Le fichier ne contient pas de dénominateur (effectifs d'enseignants requis) : l'analyse porte sur les volumes et leur répartition.")
+
+
+def xl(df, name, key):
+    b = io.BytesIO()
+    with pd.ExcelWriter(b, engine="xlsxwriter") as w: df.to_excel(w, sheet_name=name[:31], index=False)
+    st.download_button("Exporter en Excel", b.getvalue(), f"{name}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", icon=":material/download:", key=key)
+
+
+def table_xl(df, name, key):
+    if df.empty: st.info("Aucune ligne pour ces filtres.", icon=":material/filter_alt_off:"); return
+    table(df); xl(df, name, key)
+
+
+def geo_apply(df, reg=None, dep=None, arr=None, etab=None):
+    if reg and reg != "Toutes": df = df[df.Region == reg]
+    if dep and dep != "Tous": df = df[df.Departement == dep]
+    if arr and arr != "Tous": df = df[df.Arrondissement == arr]
+    if etab: df = df[df.Etablissement.isin(etab)]
+    return df
+
+
+def multi_tab():
+    loc = pd.concat([d[etl.GEO] for d in cl.values()]).drop_duplicates()
+    c = st.columns(4)
+    reg = c[0].selectbox("Région", ["Toutes"] + sorted(loc.Region.unique()), key="mt_reg")
+    L = loc if reg == "Toutes" else loc[loc.Region == reg]
+    dep = c[1].selectbox("Département", ["Tous"] + sorted(L.Departement.unique()), key=f"mt_dep_{reg}")
+    L = L if dep == "Tous" else L[L.Departement == dep]
+    arr = c[2].selectbox("Arrondissement", ["Tous"] + sorted(L.Arrondissement.unique()), key=f"mt_arr_{reg}_{dep}")
+    L = L if arr == "Tous" else L[L.Arrondissement == arr]
+    etab = c[3].multiselect("Établissements", sorted(L.Etablissement.unique()), placeholder="Tous les établissements", key=f"mt_et_{reg}_{dep}_{arr}")
+    F = dict(reg=reg, dep=dep, arr=arr, etab=etab)
+    cl_cells = etl.cells(cl); NM = {"couverture": "Couverture des programmes", "assiduite": "Assiduité", "reussite": "Réussite"}
+
+    st.subheader("Indicateurs agrégés")
+    st.caption("Chaque cellule établissement × matière compte pour une unité : l'agrégat est la moyenne de ces taux, soit une pondération de chaque établissement par son nombre de matières.")
+    for by, filt, title, key, note in [
+        (["Departement"], dict(reg=reg), "Indicateurs par département", "mt_c1", "Non affecté par le filtre département (ni arrondissement / établissement)."),
+        (["Departement", "Arrondissement"], dict(reg=reg, dep=dep), "Indicateurs par arrondissement", "mt_c2", "Affecté par les filtres région et département.")]:
+        m = etl.level_means({k: geo_apply(x, **filt) for k, x in cl_cells.items()}, by)
+        if m is None or m.empty: st.info("Aucune donnée pour ces filtres."); continue
+        viz.bars_multi(title, m[by[-1]], {NM[k]: m[v] for k, v in etl.RATE.items() if v in m}, key, sub=note)
+        table_xl(m, title.replace(" ", "_").lower(), key + "_x")
+
+    st.subheader("Tableaux détaillés")
+    specs = [("reussite", ["Matiere"], ["Effectif", "Reussis", "Reussite", "Part_filles"], "Réussite par matière", ":material/school:"),
+             ("couverture", ["Matiere", "Ens"], ["Prevu", "Realise", "Couverture"], "Couverture par enseignant", ":material/menu_book:"),
+             ("assiduite", ["Matiere", "Ens"], ["Heures_prevues", "Heures_reelles", "Assiduite"], "Assiduité par enseignant", ":material/schedule:")]
+    specs = [s_ for s_ in specs if s_[0] in cl]
+    for tab, (kind, extra, cols, label, icon) in zip(st.tabs([f"{i} {l}" for _, _, _, l, i in specs]), specs):
+        with tab:
+            d = geo_apply(cl[kind], **F).assign(Ens=lambda x: x["Enseignant"] if "Enseignant" in x else "")
+            g = etl.aggregate(kind, d, etl.GEO + extra) if len(d) else pd.DataFrame()
+            if len(g):
+                g = g.rename(columns={"Ens": "Enseignant"}); ex = [e if e != "Ens" else "Enseignant" for e in extra]
+                g = g[etl.GEO[1:] + ex + cols].sort_values(etl.RATE[kind] if etl.RATE[kind] in cols else cols[0])
+            table_xl(g, label.replace(" ", "_").lower(), f"mt_t_{kind}")
+
+    st.subheader("Matières sous un seuil de réussite")
+    if "reussite" not in cl_cells: st.info("Fichier de réussite absent."); return
+    seuil = st.slider("Seuil de taux de réussite (%)", 0, 100, 50, key="mt_seuil")
+    rc = geo_apply(cl_cells["reussite"], **F); sous = rc[rc.Reussite < seuil]
+    k = st.columns(3); k[0].metric("Cellules établissement × matière", len(rc), border=True)
+    k[1].metric("Sous le seuil", len(sous), border=True); k[2].metric("Part", f"{len(sous) / len(rc) * 100:.0f} %" if len(rc) else "—", border=True)
+    views = [("Détail matière", None), ("Par département", ["Departement"]), ("Par arrondissement", ["Departement", "Arrondissement"]), ("Par établissement", ["Departement", "Arrondissement", "Etablissement"])]
+    for tab, (lab, by) in zip(st.tabs([v[0] for v in views]), views):
+        with tab:
+            out = sous.sort_values("Reussite")[["Departement", "Arrondissement", "Etablissement", "Sous_systeme", "Matiere", "Effectif", "Reussis", "Reussite"]] if by is None else (etl.below(rc, seuil, by) if len(rc) else pd.DataFrame())
+            if by is not None and len(out): out = out[out.Matieres_sous_seuil > 0]
+            table_xl(out, f"sous_seuil_{lab.lower().replace(' ', '_')}", f"mt_s_{lab}")
+
+
+def page_uni():
+    st.header(":material/bar_chart: Analyse univariée")
+    t1, t2 = st.tabs([":material/analytics: Indicateurs", ":material/account_tree: Analyse multi-niveau"])
+    with t1: uni_tab()
+    with t2: multi_tab()
 
 
 def page_cross():
